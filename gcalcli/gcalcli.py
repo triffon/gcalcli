@@ -1246,7 +1246,7 @@ class GoogleCalendarInterface:
 
         return new_event
 
-    def AddEvent(self, title, where, start, end, descr, who, reminders):
+    def AddEvent(self, title, where, start, end, descr, who, reminders, recurrence):
 
         if len(self.cals) != 1:
             # TODO: get a better name for this exception class
@@ -1270,6 +1270,9 @@ class GoogleCalendarInterface:
             event['location'] = where
         if descr:
             event['description'] = descr
+
+        if recurrence:
+            event['recurrence'] = [recurrence]
 
         event['attendees'] = list(map(lambda w: {'email': w}, who))
 
@@ -1669,7 +1672,7 @@ def main():
 
             gcal.AddEvent(FLAGS.title, FLAGS.where, estart, eend,
                           FLAGS.description, FLAGS.who,
-                          FLAGS.reminders)
+                          FLAGS.reminders, FLAGS.recurrence)
 
         elif FLAGS.command == 'search':
             gcal.TextQuery(FLAGS.text[0], start=FLAGS.start, end=FLAGS.end)

@@ -265,6 +265,7 @@ def get_argument_parser():
             help="If --allday is given, the event will be an all-day event "
             "(possibly multi-day if --duration is greater than 1). The "
             "time part of the --when will be ignored.")
+    add.add_argument("--recurrence", default=None, type=str, help="Event recurrence")
     add.add_argument(
             "--noprompt", action="store_false", dest="prompt", default=True,
             help="Prompt for missing data when adding events")
