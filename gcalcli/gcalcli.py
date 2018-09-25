@@ -1541,7 +1541,7 @@ def parse_cal_names(cal_names):
         parts = name.split("#")
         parts_count = len(parts)
         if parts_count >= 1:
-            cal_name = parts[0]
+            cal_name = parts[0].decode('utf-8')
 
         if len(parts) == 2:
             cal_color = valid_color_name(parts[1])
