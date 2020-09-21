@@ -1,7 +1,5 @@
-from __future__ import absolute_import
 import argparse
 import sys
-from gcalcli.utils import _u
 
 COLOR_NAMES = set(('default', 'black', 'red', 'green', 'yellow', 'blue',
                    'magenta', 'cyan', 'white', 'brightblack', 'brightred',
@@ -21,17 +19,17 @@ ART_CHARS = {
         'bte': '\033(0\x76\033(B',
         'ute': '\033(0\x77\033(B'},
     'unicode': {
-        'hrz': _u(b'\xe2\x94\x80'),
-        'vrt': _u(b'\xe2\x94\x82'),
-        'lrc': _u(b'\xe2\x94\x98'),
-        'urc': _u(b'\xe2\x94\x90'),
-        'ulc': _u(b'\xe2\x94\x8c'),
-        'llc': _u(b'\xe2\x94\x94'),
-        'crs': _u(b'\xe2\x94\xbc'),
-        'lte': _u(b'\xe2\x94\x9c'),
-        'rte': _u(b'\xe2\x94\xa4'),
-        'bte': _u(b'\xe2\x94\xb4'),
-        'ute': _u(b'\xe2\x94\xac')},
+        'hrz': b'\xe2\x94\x80',
+        'vrt': b'\xe2\x94\x82',
+        'lrc': b'\xe2\x94\x98',
+        'urc': b'\xe2\x94\x90',
+        'ulc': b'\xe2\x94\x8c',
+        'llc': b'\xe2\x94\x94',
+        'crs': b'\xe2\x94\xbc',
+        'lte': b'\xe2\x94\x9c',
+        'rte': b'\xe2\x94\xa4',
+        'bte': b'\xe2\x94\xb4',
+        'ute': b'\xe2\x94\xac'},
     'ascii': {
         'hrz': '-',
         'vrt': '|',
@@ -48,7 +46,7 @@ ART_CHARS = {
 
 def valid_color_name(value):
     if value not in COLOR_NAMES:
-        raise argparse.ArgumentTypeError("%s is not a valid color" % value)
+        raise argparse.ArgumentTypeError('%s is not a valid color' % value)
     return value
 
 
@@ -59,7 +57,7 @@ class Printer(object):
         self.use_color = use_color
         self.conky = conky
         self.colors = {
-                'default': '' if conky else '\033[0m',
+                'default': '${color}' if conky else '\033[0m',
                 'black': '${color black}' if conky else '\033[0;30m',
                 'brightblack': '${color black}' if conky else '\033[30;1m',
                 'red': '${color red}' if conky else '\033[0;31m',
@@ -76,7 +74,7 @@ class Printer(object):
                 'brightcyan': '${color cyan}' if conky else '\033[36;1m',
                 'white': '${color white}' if conky else '\033[0;37m',
                 'brightwhite': '${color white}' if conky else '\033[37;1m',
-                None: '' if conky else '\033[0m'}
+                None: '${color}' if conky else '\033[0m'}
         self.colorset = set(self.colors.keys())
 
         self.art_style = art_style
@@ -88,7 +86,7 @@ class Printer(object):
     def msg(self, msg, colorname='default', file=sys.stdout):
         if self.use_color:
             msg = self.colors[colorname] + msg + self.colors['default']
-        file.write(_u(msg))
+        file.write(msg)
 
     def err_msg(self, msg):
         self.msg(msg, 'brightred', file=sys.stderr)
