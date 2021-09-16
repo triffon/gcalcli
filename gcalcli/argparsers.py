@@ -372,6 +372,10 @@ def get_argument_parser():
     add.add_argument(
             '--description', default=None, type=str, help='Event description')
     add.add_argument("--recurrence", default=None, type=str, help="Event recurrence")
+    add.add_argument('--transparent', action='store_true', dest='transparent',
+                     default=False, help='If --transparent is given, the event'
+                     ' will not block a slot in the calendar and the user will'
+                     ' be shown as "free"')
     add.add_argument(
             '--allday', action='store_true', dest='allday', default=False,
             help='If --allday is given, the event will be an all-day event '

@@ -1346,6 +1346,9 @@ class GoogleCalendarInterface:
         if color:
             event['colorId'] = get_override_color_id(color)
 
+        if self.options['transparent']:
+            event['transparency'] = 'transparent'
+
         event['attendees'] = list(map(lambda w: {'email': w}, who))
 
         event = self._add_reminders(event, reminders)
