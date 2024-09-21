@@ -1,28 +1,30 @@
 from collections import namedtuple
 from csv import DictReader, excel_tab
 from datetime import date, datetime, timedelta
+import functools
 from itertools import chain
 import json
 import os
+import pathlib
 import random
 import re
 import shlex
+import shutil
 import sys
 import textwrap
 import time
+from typing import Iterable
 from unicodedata import east_asian_width
 
-from apiclient.discovery import build
-from apiclient.errors import HttpError
+import googleapiclient.http
 from dateutil.parser import parse
 from dateutil.relativedelta import relativedelta
 from dateutil.tz import tzlocal
-import httplib2
-from oauth2client import tools
-from oauth2client.client import OAuth2WebServerFlow
-from oauth2client.file import Storage
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
-from . import __program__, __version__, actions, utils
+from . import actions, auth, config, env, ics, utils
+from ._types import Cache, CalendarListEntry, Event
 from .actions import ACTIONS
 from .conflicts import ShowConflicts
 from .details import _valid_title, ACTION_DEFAULT, DETAILS_DEFAULT, HANDLERS
@@ -34,7 +36,7 @@ from .validators import (get_input, get_override_color_id, PARSABLE_DATE,
                          STR_NOT_EMPTY, STR_TO_INT, VALID_COLORS)
 
 try:
-    import cPickle as pickle
+    import cPickle as pickle  # type: ignore
 except Exception:
     import pickle
 
@@ -42,18 +44,21 @@ except Exception:
 EventTitle = namedtuple('EventTitle', ['title', 'color'])
 
 CONFERENCE_DATA_VERSION = 1
+PRINTER = Printer()
 
 
 class GoogleCalendarInterface:
-
-    cache = {}
-    all_cals = []
+    cache: Cache = {}
+    all_cals: list[CalendarListEntry] = []
     now = datetime.now(tzlocal())
     agenda_length = 5
     conflicts_lookahead_days = 30
     max_retries = 5
-    auth_http = None
+    credentials = None
     cal_service = None
+    # Special override to bypass all auth and defer the auth-related failures
+    # as late as possible, for testing.
+    userless_mode: bool = False
 
     ACCESS_OWNER = 'owner'
     ACCESS_WRITER = 'writer'
@@ -62,15 +67,24 @@ class GoogleCalendarInterface:
 
     UNIWIDTH = {'W': 2, 'F': 2, 'N': 1, 'Na': 1, 'H': 1, 'A': 1}
 
-    def __init__(self, cal_names=[], printer=Printer(), **options):
+    def __init__(
+        self, cal_names=(), printer=PRINTER, userless_mode=False, **options
+    ):
         self.cals = []
         self.printer = printer
         self.options = options
+        self.userless_mode = userless_mode
 
         self.details = options.get('details', {})
         # stored as detail, but provided as option: TODO: fix that
         self.details['width'] = options.get('width', 80)
-        self._get_cached()
+        if self.userless_mode:
+            print(
+                "Running in GCALCLI_USERLESS_MODE. Most operations will fail!",
+                file=sys.stderr,
+            )
+        else:
+            self._get_cached()
 
         self._select_cals(cal_names)
 
@@ -79,7 +93,9 @@ class GoogleCalendarInterface:
             raise GcalcliError('this object should not already have cals')
 
         if not selected_names:
-            self.cals = self.all_cals
+            ignore_cals = self.options['ignore_calendars']
+            self.cals = [c for c in self.all_cals
+                         if c['summary'] not in ignore_cals]
             return
 
         for cal_name in selected_names:
@@ -103,16 +119,7 @@ class GoogleCalendarInterface:
             # operate against
             self.cals += matches
 
-    @staticmethod
-    def _localize_datetime(dt):
-        if not hasattr(dt, 'tzinfo'):  # Why are we skipping these?
-            return dt
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=tzlocal())
-        else:
-            return dt.astimezone(tzlocal())
-
-    def _retry_with_backoff(self, method):
+    def _retry_with_backoff(self, method: googleapiclient.http.HttpRequest):
         for n in range(self.max_retries):
             try:
                 return method.execute()
@@ -128,40 +135,162 @@ class GoogleCalendarInterface:
 
         return None
 
+    @functools.cache
+    def data_file_path(self, name: str) -> pathlib.Path:
+        paths = env.data_file_paths(name)
+        primary_path = paths.pop(0)
+        if not primary_path.exists():
+            for alt_path in paths:
+                if not alt_path.exists():
+                    continue
+                self.printer.msg(
+                    f'Moving {name} file from legacy path {alt_path} to '
+                    f'{primary_path}...\n'
+                )
+                primary_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(alt_path, primary_path)
+                break
+
+        return primary_path
+
     def _google_auth(self):
-        from argparse import Namespace
-        if not self.auth_http:
-            if self.options['config_folder']:
-                storage = Storage(
-                        os.path.expanduser(
-                                '%s/oauth' % self.options['config_folder']
-                        )
+        if not self.credentials:
+            self._load_credentials()
+
+        if not self.credentials:
+            # Automatically trigger auth flow.
+            # Note: This might change in the future to fail with suggestion to
+            # run init command.
+            self.printer.msg('Not yet authenticated.\n')
+            self.SetupAuth()
+
+        return self.credentials
+
+    def _load_credentials(self):
+        if self.userless_mode:
+            return
+
+        # Try loading cached credentials
+        oauth_filepath = self.data_file_path('oauth')
+        if not oauth_filepath.exists():
+            return
+
+        needs_write = False
+        with oauth_filepath.open('rb') as gcalcli_oauth:
+            try:
+                self.credentials = pickle.load(gcalcli_oauth)
+            except (pickle.UnpicklingError, EOFError) as e:
+                # Try reading as legacy json format as fallback.
+                try:
+                    gcalcli_oauth.seek(0)
+                    self.credentials = auth.creds_from_legacy_json(
+                        json.load(gcalcli_oauth)
+                    )
+                    needs_write = True
+                except (OSError, ValueError, EOFError):
+                    pass
+                if not self.credentials:
+                    self.printer.err_msg(
+                        f"Couldn't parse {oauth_filepath}.\n"
+                        "The file may be corrupt or be incompatible with "
+                        "this version of gcalcli. It probably has to be "
+                        "removed and provisioning done again.\n"
+                    )
+                    raise e
+        if needs_write:
+            # Save back loaded creds to file (for legacy conversion case).
+            oauth_filepath.parent.mkdir(parents=True, exist_ok=True)
+            with oauth_filepath.open('wb') as gcalcli_oauth:
+                pickle.dump(self.credentials, gcalcli_oauth)
+
+    def SetupAuth(self):
+        oauth_filepath = self.data_file_path('oauth')
+
+        # Try loading cached credentials
+        self._load_credentials()
+        if self.credentials:
+            self.printer.msg('Credentials already configured. ')
+            self.printer.msg('Ignore and refresh? [N]o [y]es: ', 'magenta')
+            val = input()
+            if val and val.lower() == 'y' and not self.userless_mode:
+                if oauth_filepath.exists():
+                    backup_filepath = oauth_filepath.with_suffix('.bak')
+                    self.printer.debug_msg(
+                        'Moving existing oauth creds aside from '
+                        '{oauth} to {bak}\n'.format(
+                            oauth=utils.shorten_path(oauth_filepath),
+                            bak=utils.shorten_path(backup_filepath),
+                        ))
+                    oauth_filepath.rename(backup_filepath)
+                cache_filepath = self.data_file_path('cache')
+                cache_filepath.unlink(missing_ok=True)
+                self.credentials = None
+            else:  # n, abort without refreshing
+                self.printer.msg('Aborting, keeping existing credentials...')
+                return
+
+        if not self.credentials:
+            # No cached credentials, start auth flow
+            self.printer.msg('Starting auth flow...\n', 'yellow')
+            self.printer.msg(
+                'NOTE: See '
+                'https://github.com/insanum/gcalcli/blob/HEAD/docs/api-auth.md '
+                'for help/troubleshooting.\n'
+            )
+            missing_info = [
+                opt
+                for opt in ['client_id', 'client_secret']
+                if self.options.get(opt) is None
+            ]
+            if missing_info:
+                self.printer.msg(
+                    f"You'll be asked for a {' and '.join(missing_info)} "
+                    'that you should have set up for yourself in Google '
+                    'dev console.\n'
                 )
-            else:
-                storage = Storage(os.path.expanduser('~/.gcalcli_oauth'))
-            credentials = storage.get()
-
-            if credentials is None or credentials.invalid:
-                credentials = tools.run_flow(
-                    OAuth2WebServerFlow(
-                        client_id=self.options['client_id'],
-                        client_secret=self.options['client_secret'],
-                        scope=['https://www.googleapis.com/auth/calendar'],
-                        user_agent=__program__ + '/' + __version__
-                    ),
-                    storage,
-                    Namespace(**self.options)
+            client_id = self.options.get('client_id')
+            if client_id is None:
+                self.printer.msg('Client ID: ', 'magenta')
+                client_id = input()
+            client_secret = self.options.get('client_secret')
+            if client_secret is None:
+                self.printer.msg('Client Secret: ', 'magenta')
+                client_secret = input()
+            self.printer.msg(
+                'Now click the link below and follow directions to '
+                'authenticate.\n',
+                'yellow',
+            )
+            self.printer.msg(
+                'You will likely see a security warning page and need to '
+                'click "Advanced" and "Go to gcalcli (unsafe)" to proceed.\n'
+            )
+            if self.userless_mode:
+                self.printer.msg(
+                    'Skipping actual authentication (running in userless '
+                    'mode)\n'
                 )
+                return
+            self.credentials = auth.authenticate(
+                client_id,
+                client_secret,
+                printer=self.printer,
+                local=self.options['auth_local_server'],
+            )
+            oauth_filepath.parent.mkdir(parents=True, exist_ok=True)
+            with open(oauth_filepath, 'wb') as gcalcli_oauth:
+                pickle.dump(self.credentials, gcalcli_oauth)
 
-            self.auth_http = credentials.authorize(httplib2.Http())
-
-        return self.auth_http
+        auth.refresh_if_expired(self.credentials)
+        self.printer.debug_msg('Successfully loaded credentials\n')
 
     def get_cal_service(self):
-        if not self.cal_service:
-            self.cal_service = build(serviceName='calendar',
-                                     version='v3',
-                                     http=self._google_auth())
+        if not self.cal_service and not self.userless_mode:
+            self.cal_service = build(
+                serviceName='calendar',
+                version='v3',
+                credentials=self._google_auth(),
+            )
 
         return self.cal_service
 
@@ -169,19 +298,10 @@ class GoogleCalendarInterface:
         return self.get_cal_service().events()
 
     def _get_cached(self):
-        if self.options['config_folder']:
-            cache_file = os.path.expanduser(
-                    '%s/cache' % self.options['config_folder']
-            )
-        else:
-            cache_file = os.path.expanduser('~/.gcalcli_cache')
+        cache_path = self.data_file_path('cache')
 
         if self.options['refresh_cache']:
-            try:
-                os.remove(cache_file)
-            except OSError:
-                pass
-                # fall through
+            cache_path.unlink(missing_ok=True)
 
         self.cache = {}
         self.all_cals = []
@@ -190,7 +310,7 @@ class GoogleCalendarInterface:
             # note that we need to use pickle for cache data since we stuff
             # various non-JSON data in the runtime storage structures
             try:
-                with open(cache_file, 'rb') as _cache_:
+                with cache_path.open('rb') as _cache_:
                     self.cache = pickle.load(_cache_)
                     self.all_cals = self.cache['all_cals']
                 # XXX assuming data is valid, need some verification check here
@@ -199,28 +319,24 @@ class GoogleCalendarInterface:
                 pass
                 # fall through
 
-        cal_list = self._retry_with_backoff(
-            self.get_cal_service().calendarList().list()
-        )
-
+        pageToken = None
         while True:
-            for cal in cal_list['items']:
-                self.all_cals.append(cal)
+            cal_list = self._retry_with_backoff(
+                self.get_cal_service().calendarList().list(
+                    pageToken=pageToken)
+            )
+
+            self.all_cals.extend(cal_list['items'])
             page_token = cal_list.get('nextPageToken')
-            if page_token:
-                cal_list = self._retry_with_backoff(
-                    self.get_cal_service().calendarList().list(
-                        pageToken=page_token
-                    )
-                )
-            else:
+            if not page_token:
                 break
 
         self.all_cals.sort(key=lambda x: x['accessRole'])
 
         if self.options['use_cache']:
             self.cache['all_cals'] = self.all_cals
-            with open(cache_file, 'wb') as _cache_:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with cache_path.open('wb') as _cache_:
                 pickle.dump(self.cache, _cache_)
 
     def _calendar_color(self, event, override_color=False):
@@ -256,14 +372,16 @@ class GoogleCalendarInterface:
         else:
             return 'default'
 
-    def _cal_monday(self, day_num):
-        """Shift the day number if we're doing cal monday, or cal_weekend is
-        false, since that also means we're starting on day 1
-        """
-        if self.options['cal_monday'] or not self.options['cal_weekend']:
-            day_num -= 1
-            if day_num < 0:
-                day_num = 6
+    def _cal_weekday_num(self, day: date | datetime) -> int:
+        """Number of day of week for the given date.
+
+        Evaluates a date against week_start and cal_weekend options and returns
+        a day number starting from sunday=0 or monday=0."""
+        day_num = int(day.strftime('%w'))
+        if (self.options['week_start'] == config.WeekStart.MONDAY
+                or not self.options['cal_weekend']):
+            # Shift to count starting from monday (subtract 1, mod 7)
+            day_num = (day_num - 1 + 7) % 7
         return day_num
 
     def _event_time_in_range(self, e_time, r_start, r_end):
@@ -301,7 +419,7 @@ class GoogleCalendarInterface:
             now_in_week = False
 
         for event in event_list:
-            event_daynum = self._cal_monday(int(event['s'].strftime('%w')))
+            event_daynum = self._cal_weekday_num(event['s'])
             event_allday = is_all_day(event)
 
             event_end_date = event['e']
@@ -366,10 +484,7 @@ class GoogleCalendarInterface:
                     if event_end_date > end_dt:
                         end_daynum = 6
                     else:
-                        end_daynum = \
-                            self._cal_monday(
-                                    int(event_end_date.strftime('%w'))
-                            )
+                        end_daynum = self._cal_weekday_num(event_end_date)
                     if event_daynum > end_daynum:
                         event_daynum = 0
                     for day in range(event_daynum, end_daynum + 1):
@@ -450,7 +565,8 @@ class GoogleCalendarInterface:
         days = 7 if self.options['cal_weekend'] else 5
         # Get the localized day names... January 1, 2001 was a Monday
         day_names = [date(2001, 1, i + 1).strftime('%A') for i in range(days)]
-        if not self.options['cal_monday'] or not self.options['cal_weekend']:
+        if (self.options['week_start'] != config.WeekStart.MONDAY
+                or not self.options['cal_weekend']):
             day_names = day_names[6:] + day_names[:6]
 
         def build_divider(left, center, right):
@@ -499,7 +615,7 @@ class GoogleCalendarInterface:
 
         # get date range objects for the first week
         if cmd == 'calm':
-            day_num = self._cal_monday(int(start_datetime.strftime('%w')))
+            day_num = self._cal_weekday_num(start_datetime)
             start_datetime = (start_datetime - timedelta(days=day_num))
         start_week_datetime = start_datetime
         end_week_datetime = (start_week_datetime + timedelta(days=7))
@@ -607,7 +723,7 @@ class GoogleCalendarInterface:
             for handler in handlers:
                 row.extend(handler.get(event))
 
-            output = ('\t'.join(row)).replace('\n', '''\\n''')
+            output = ('\t'.join(row)).replace('\n', r'\n')
             print(output)
 
     def _PrintEvent(self, event, prefix):
@@ -767,7 +883,7 @@ class GoogleCalendarInterface:
                     self.printer.msg(xstr, 'default')
 
         if self.details.get('email') \
-                and 'email' in event['creator'] \
+                and 'email' in event.get('creator', {}) \
                 and event['creator']['email'].strip():
             xstr = '%s  Email: %s\n' % (
                 details_indent,
@@ -935,8 +1051,7 @@ class GoogleCalendarInterface:
                     all_day = self.options.get('allday')
                     try:
                         new_start, new_end = utils.get_times_from_duration(
-                                val, length, all_day
-                        )
+                            val, duration=length, all_day=all_day)
                     except ValueError as exc:
                         self.printer.err_msg(str(exc))
                         sys.exit(1)
@@ -951,9 +1066,9 @@ class GoogleCalendarInterface:
                     all_day = self.options.get('allday')
                 try:
                     new_start, new_end = utils.get_times_from_duration(
-                            event['start']['dateTime'], val,
-                            all_day
-                    )
+                        event['start']['dateTime'],
+                        duration=val,
+                        all_day=all_day)
                     event = self._SetEventStartEnd(new_start, new_end, event)
                 except ValueError as exc:
                     self.printer.err_msg(str(exc))
@@ -963,7 +1078,7 @@ class GoogleCalendarInterface:
                 while True:
                     r = get_input(
                             self.printer, "Enter a valid reminder or '.' to"
-                                          "end: ", REMINDER
+                                          'end: ', REMINDER
                     )
                     if r == '.':
                         break
@@ -1026,15 +1141,20 @@ class GoogleCalendarInterface:
 
         return selected
 
-    def _GetAllEvents(self, cal, events, end):
-
-        event_list = []
-
-        while 1:
-            if 'items' not in events:
-                break
-
-            for event in events['items']:
+    def _GetAllEvents(self, cal, start, end, search_text) -> Iterable[Event]:
+        pageToken = None
+        while True:
+            events = self._retry_with_backoff(
+                    self.get_events()
+                    .list(
+                        calendarId=cal['id'],
+                        timeMin=start.isoformat() if start else None,
+                        timeMax=end.isoformat() if end else None,
+                        q=search_text if search_text else None,
+                        singleEvents=True,
+                        pageToken=pageToken)
+                    )
+            for event in events.get('items', []):
 
                 event['gcalcli_cal'] = cal
 
@@ -1047,7 +1167,7 @@ class GoogleCalendarInterface:
                     # all date events
                     event['s'] = parse(event['start']['date'])
 
-                event['s'] = self._localize_datetime(event['s'])
+                event['s'] = utils.localize_datetime(event['s'])
 
                 if 'dateTime' in event['end']:
                     event['e'] = parse(event['end']['dateTime'])
@@ -1055,7 +1175,7 @@ class GoogleCalendarInterface:
                     # all date events
                     event['e'] = parse(event['end']['date'])
 
-                event['e'] = self._localize_datetime(event['e'])
+                event['e'] = utils.localize_datetime(event['e'])
 
                 # For all-day events, Google seems to assume that the event
                 # time is based in the UTC instead of the local timezone.  Here
@@ -1071,74 +1191,46 @@ class GoogleCalendarInterface:
                 if event['s'].year >= 2038 or event['e'].year >= 2038:
                     continue
 
-                event_list.append(event)
+                yield event
 
             pageToken = events.get('nextPageToken')
-            if pageToken:
-                events = self._retry_with_backoff(
-                             self.get_events()
-                                 .list(
-                                     calendarId=cal['id'],
-                                     pageToken=pageToken
-                                 )
-                         )
-            else:
+            if not pageToken:
                 break
 
-        return event_list
-
     def _search_for_events(self, start, end, search_text):
-
         event_list = []
         for cal in self.cals:
-            events = self._retry_with_backoff(
-                         self.get_events()
-                             .list(
-                                 calendarId=cal['id'],
-                                 timeMin=start.isoformat() if start else None,
-                                 timeMax=end.isoformat() if end else None,
-                                 q=search_text if search_text else None,
-                                 singleEvents=True
-                             )
-                    )
-            event_list.extend(self._GetAllEvents(cal, events, end))
-
+            event_list.extend(
+                self._GetAllEvents(cal, start, end, search_text=search_text))
         event_list.sort(key=lambda x: x['s'])
-
         return event_list
 
     def _DeclinedEvent(self, event):
-        if 'attendees' in event:
-            attendees = [a for a in event['attendees']
-                         if a['email'] == event['gcalcli_cal']['id']]
-            if attendees and attendees[0]['responseStatus'] == 'declined':
-                return True
-        return False
+        return any(a['responseStatus'] == 'declined'
+                   for a in event.get('attendees', [])
+                   if 'self' in a or a['email'] == event['gcalcli_cal']['id'])
 
     def ListAllCalendars(self):
-        access_len = 0
-
-        for cal in self.all_cals:
-            length = len(cal['accessRole'])
-            if length > access_len:
-                access_len = length
-
-        if access_len < len('Access'):
-            access_len = len('Access')
+        access_len = max(len(cal['accessRole']) for cal in self.all_cals)
+        access_len = max(access_len, len('Access'))
 
         _format = ' %0' + str(access_len) + 's  %s\n'
 
         self.printer.msg(
-                _format % ('Access', 'Title'), self.options['color_title']
+            _format % ('Access', 'Title'), self.options['color_title']
         )
         self.printer.msg(
-                _format % ('------', '-----'), self.options['color_title']
+            _format % ('------', '-----'), self.options['color_title']
         )
 
         for cal in self.all_cals:
+            name = cal['summary']
+            ignored = name in self.options['ignore_calendars']
+            if ignored:
+                name = f'{name} (ignored)'
             self.printer.msg(
-                    _format % (cal['accessRole'], cal['summary']),
-                    self._calendar_color(cal)
+                _format % (cal['accessRole'], name),
+                self._calendar_color(cal) if not ignored else 'brightblack'
             )
 
     def _display_queried_events(self, start, end, search=None,
@@ -1168,11 +1260,11 @@ class GoogleCalendarInterface:
         event_list = [e for e in event_list
                       if (utils.get_time_from_str(e['updated']) >=
                           last_updated_datetime)]
-        print("Updates since:",
+        print('Updates since:',
               last_updated_datetime,
-              "events starting",
+              'events starting',
               start,
-              "until",
+              'until',
               end)
         return self._iterate_events(start, event_list, year_date=False)
 
@@ -1185,7 +1277,7 @@ class GoogleCalendarInterface:
 
         event_list = self._search_for_events(start, end, search_text)
         show_conflicts = ShowConflicts(
-                            lambda e: self._PrintEvent(e, "\t !!! Conflict: "))
+                            lambda e: self._PrintEvent(e, '\t !!! Conflict: '))
 
         return self._iterate_events(start,
                                     event_list,
@@ -1210,7 +1302,7 @@ class GoogleCalendarInterface:
         cal = self.cals[0]
 
         for row in reader:
-            action = row.get("action", ACTION_DEFAULT)
+            action = row.get('action', ACTION_DEFAULT)
             if action not in ACTIONS:
                 raise GcalcliError('Action "{}" not supported.'.format(action))
 
@@ -1229,12 +1321,13 @@ class GoogleCalendarInterface:
                 start = start.replace(hour=0, minute=0, second=0,
                                       microsecond=0)
             except Exception:
-                self.printer.err_msg('Error: failed to parse start time\n')
+                self.printer.err_msg(
+                    f'Error: failed to parse start time {start_text!r}\n')
                 return
 
         # convert start date to the beginning of the week or month
         if cmd == 'calw':
-            day_num = self._cal_monday(int(start.strftime('%w')))
+            day_num = self._cal_weekday_num(start)
             start = (start - timedelta(days=day_num))
             end = (start + timedelta(days=(count * 7)))
         else:  # cmd == 'calm':
@@ -1246,11 +1339,11 @@ class GoogleCalendarInterface:
                 end_year += 1
             end = start.replace(month=end_month, year=end_year)
             days_in_month = (end - start).days
+            # TODO: Is this correct for --noweekend? Still uses % 7 below?
             offset_days = int(start.strftime('%w'))
-            if self.options['cal_monday']:
-                offset_days -= 1
-                if offset_days < 0:
-                    offset_days = 6
+            if self.options['week_start'] == config.WeekStart.MONDAY:
+                # Shift to count starting from monday (subtract 1, mod 7)
+                offset_days = (offset_days - 1 + 7) % 7
             total_days = (days_in_month + offset_days)
             count = int(total_days / 7)
             if total_days % 7:
@@ -1260,20 +1353,37 @@ class GoogleCalendarInterface:
 
         self._GraphEvents(cmd, start, count, event_list)
 
+    def _prompt_for_calendar(self, cals):
+        if not cals:
+            raise GcalcliError('No available calendar to use')
+        if len(cals) == 1:
+            return cals[0]
+        # Calendar not specified. Prompt the user to select it
+        writers = (self.ACCESS_OWNER, self.ACCESS_WRITER)
+        cals_with_write_perms = [cal for cal in self.cals
+                                 if cal['accessRole'] in writers]
+
+        print('\n'.join(f"{idx} {cal['summary']}"
+                        for idx, cal in enumerate(cals_with_write_perms)))
+        val = get_input(self.printer, 'Specify calendar from above: ',
+                        STR_TO_INT)
+        try:
+            return cals_with_write_perms[int(val)]
+        except IndexError:
+            raise GcalcliError(
+                f'Invalid selection from the list above: {val}\n')
+
     def QuickAddEvent(self, event_text, reminders=None):
         """Wrapper around Google Calendar API's quickAdd"""
         if not event_text:
             raise GcalcliError('event_text is required for a quickAdd')
 
-        if len(self.cals) != 1:
-            # TODO: get a better name for this exception class
-            # and use it elsewhere
-            raise GcalcliError('You must only specify a single calendar\n')
+        calendar = self._prompt_for_calendar(self.cals)
 
         new_event = self._retry_with_backoff(
             self.get_events()
                 .quickAdd(
-                    calendarId=self.cals[0]['id'],
+                    calendarId=calendar['id'],
                     text=event_text
                 )
         )
@@ -1290,7 +1400,7 @@ class GoogleCalendarInterface:
             new_event = self._retry_with_backoff(
                             self.get_events()
                                 .patch(
-                                    calendarId=self.cals[0]['id'],
+                                    calendarId=calendar['id'],
                                     eventId=new_event['id'],
                                     body=rem
                                 )
@@ -1304,24 +1414,7 @@ class GoogleCalendarInterface:
 
     def AddEvent(self, title, where, start, end, descr, who, reminders, recurrence, color):
 
-        if len(self.cals) != 1:
-            # Calendar not specified. Prompt the user to select it
-            writers = (self.ACCESS_OWNER, self.ACCESS_WRITER)
-            cals_with_write_perms = [cal for cal in self.cals
-                                     if cal['accessRole'] in writers]
-
-            cal_names_with_idx = []
-            for idx, cal in enumerate(cals_with_write_perms):
-                cal_names_with_idx.append(str(idx) + ' ' + cal['summary'])
-            cal_names_with_idx = '\n'.join(cal_names_with_idx)
-            print(cal_names_with_idx)
-            val = get_input(self.printer, 'Specify calendar from above: ',
-                            STR_TO_INT)
-            try:
-                self.cals = [cals_with_write_perms[int(val)]]
-            except IndexError:
-                raise GcalcliError('The entered number doesn\'t appear on the '
-                                   'list above\n')
+        calendar = self._prompt_for_calendar(self.cals)
 
         event = {}
         event['summary'] = title
@@ -1332,9 +1425,9 @@ class GoogleCalendarInterface:
 
         else:
             event['start'] = {'dateTime': start,
-                              'timeZone': self.cals[0]['timeZone']}
+                              'timeZone': calendar['timeZone']}
             event['end'] = {'dateTime': end,
-                            'timeZone': self.cals[0]['timeZone']}
+                            'timeZone': calendar['timeZone']}
 
         if where:
             event['location'] = where
@@ -1353,7 +1446,7 @@ class GoogleCalendarInterface:
 
         event = self._add_reminders(event, reminders)
         events = self.get_events()
-        request = events.insert(calendarId=self.cals[0]['id'], body=event)
+        request = events.insert(calendarId=calendar['id'], body=event)
         new_event = self._retry_with_backoff(request)
 
         if self.details.get('url'):
@@ -1425,131 +1518,38 @@ class GoogleCalendarInterface:
         if not pid:
             os.execvp(cmd[0], cmd)
 
+    def _event_should_use_new_import_api(
+            self, event: Event, cal: CalendarListEntry
+    ) -> bool:
+        """Evaluates whether a given event should use the newer "import" API.
+
+        Returns true if the user hasn't opted out and the event is cleanly
+        importable.
+        """
+        if not self.options.get('use_legacy_import'):
+            return False
+        event_includes_self = any(
+                'self' in a or a['email'] == cal['id']
+                for a in event.get('attendees', []))
+        return 'iCalUID' in event and event_includes_self
+
     def ImportICS(self, verbose=False, dump=False, reminders=None,
                   icsFile=None):
-
-        def CreateEventFromVOBJ(ve):
-
-            event = {}
-
-            if verbose:
-                print('+----------------+')
-                print('| Calendar Event |')
-                print('+----------------+')
-
-            if hasattr(ve, 'summary'):
-                if verbose:
-                    print('Event........%s' % ve.summary.value)
-                event['summary'] = ve.summary.value
-
-            if hasattr(ve, 'location'):
-                if verbose:
-                    print('Location.....%s' % ve.location.value)
-                event['location'] = ve.location.value
-
-            if not hasattr(ve, 'dtstart') or not hasattr(ve, 'dtend'):
-                self.printer.err_msg(
-                        'Error: event does not have a dtstart and dtend!\n'
-                )
-                return None
-
-            if verbose:
-                if ve.dtstart.value:
-                    print('Start........%s' % ve.dtstart.value.isoformat())
-                if ve.dtend.value:
-                    print('End..........%s' % ve.dtend.value.isoformat())
-                if ve.dtstart.value:
-                    print('Local Start..%s' %
-                          self._localize_datetime(ve.dtstart.value)
-                          )
-                if ve.dtend.value:
-                    print('Local End....%s' %
-                          self._localize_datetime(ve.dtend.value)
-                          )
-
-            if hasattr(ve, 'rrule'):
-                if verbose:
-                    print('Recurrence...%s' % ve.rrule.value)
-
-                event['recurrence'] = ['RRULE:' + ve.rrule.value]
-
-            if hasattr(ve, 'dtstart') and ve.dtstart.value:
-                # XXX
-                # Timezone madness! Note that we're using the timezone for the
-                # calendar being added to. This is OK if the event is in the
-                # same timezone. This needs to be changed to use the timezone
-                # from the DTSTART and DTEND values. Problem is, for example,
-                # the TZID might be "Pacific Standard Time" and Google expects
-                # a timezone string like "America/Los_Angeles". Need to find a
-                # way in python to convert to the more specific timezone
-                # string.
-                # XXX
-                # print ve.dtstart.params['X-VOBJ-ORIGINAL-TZID'][0]
-                # print self.cals[0]['timeZone']
-                # print dir(ve.dtstart.value.tzinfo)
-                # print vars(ve.dtstart.value.tzinfo)
-
-                start = ve.dtstart.value.isoformat()
-                if isinstance(ve.dtstart.value, datetime):
-                    event['start'] = {'dateTime': start,
-                                      'timeZone': self.cals[0]['timeZone']}
-                else:
-                    event['start'] = {'date': start}
-
-                event = self._add_reminders(event, reminders)
-
-                # Can only have an end if we have a start, but not the other
-                # way around apparently...  If there is no end, use the start
-                if hasattr(ve, 'dtend') and ve.dtend.value:
-                    end = ve.dtend.value.isoformat()
-                    if isinstance(ve.dtend.value, datetime):
-                        event['end'] = {'dateTime': end,
-                                        'timeZone': self.cals[0]['timeZone']}
-                    else:
-                        event['end'] = {'date': end}
-
-                else:
-                    event['end'] = event['start']
-
-            if hasattr(ve, 'description') and ve.description.value.strip():
-                descr = ve.description.value.strip()
-                if verbose:
-                    print('Description:\n%s' % descr)
-                event['description'] = descr
-
-            if hasattr(ve, 'organizer'):
-                if ve.organizer.value.startswith('MAILTO:'):
-                    email = ve.organizer.value[7:]
-                else:
-                    email = ve.organizer.value
-                if verbose:
-                    print('organizer:\n %s' % email)
-                event['organizer'] = {'displayName': ve.organizer.name,
-                                      'email': email}
-
-            if hasattr(ve, 'attendee_list'):
-                if verbose:
-                    print('attendees:')
-                event['attendees'] = []
-                for attendee in ve.attendee_list:
-                    if attendee.value.upper().startswith('MAILTO:'):
-                        email = attendee.value[7:]
-                    else:
-                        email = attendee.value
-                    if verbose:
-                        print(' %s' % email)
-
-                    event['attendees'].append({'displayName': attendee.name,
-                                               'email': email})
-
-            return event
-
-        try:
-            import vobject
-        except ImportError:
+        if not ics.has_vobject_support():
             self.printer.err_msg(
-                    'Python vobject module not installed!\n'
+                'Python vobject module not installed!\n'
             )
+            self.printer.msg(
+                'To use the import command, you need to first install the '
+                '"vobject" extra.\n'
+                'For setup instructions, see '
+                "https://github.com/insanum/gcalcli and documentation for the "
+                'gcalcli package on your platform.\n')
+            sys_path_str = '\n  '.join(sys.path)
+            self.printer.debug_msg(
+                'Searched for vobject using python interpreter at '
+                f'"{sys.executable}" with module search path:\n'
+                f"  {sys_path_str}\n")
             sys.exit(1)
 
         if dump:
@@ -1567,53 +1567,81 @@ class GoogleCalendarInterface:
                 self.printer.err_msg('Error: ' + str(e) + '!\n')
                 sys.exit(1)
 
-        while True:
-            try:
-                v = next(vobject.readComponents(f))
-            except StopIteration:
-                break
+        events_to_import = ics.get_events(
+            f,
+            verbose=verbose,
+            default_tz=self.cals[0]['timeZone'],
+            printer=self.printer)
+        if not dump and any(
+                self._event_should_use_new_import_api(event, self.cals[0])
+                for event in events_to_import):
+            self.printer.msg(
+                '\n'
+                'NOTE: This import will use a new graceful import feature in '
+                'gcalcli to avoid creating duplicate events (see '
+                'https://github.com/insanum/gcalcli/issues/492).\n'
+                'If you see any issues, you can cancel and retry with '
+                '--use-legacy-import to restore the old behavior.\n\n')
+            time.sleep(1)
 
-            for ve in v.vevent_list:
-                event = CreateEventFromVOBJ(ve)
+        for event in events_to_import:
+            if not event:
+                continue
 
-                if not event:
-                    continue
+            if dump:
+                continue
 
-                if dump:
-                    continue
+            self._add_reminders(event, reminders)
 
-                if not verbose:
-                    new_event = self._retry_with_backoff(
-                                    self.get_events()
-                                        .insert(
-                                            calendarId=self.cals[0]['id'],
-                                            body=event
-                                        )
-                                )
-                    hlink = new_event.get('htmlLink')
-                    self.printer.msg(
-                            'New event added: %s\n' % hlink, 'green'
-                    )
-                    continue
-
+            if not verbose:
+                # Don't prompt, just assume user wants to import.
+                pass
+            else:
+                # Prompt for whether to import.
                 self.printer.msg('\n[S]kip [i]mport [q]uit: ', 'magenta')
                 val = input()
                 if not val or val.lower() == 's':
                     continue
-                if val.lower() == 'i':
-                    new_event = self._retry_with_backoff(
-                                    self.get_events()
-                                        .insert(
-                                            calendarId=self.cals[0]['id'],
-                                            body=event
-                                        )
-                                )
-                    hlink = new_event.get('htmlLink')
-                    self.printer.msg('New event added: %s\n' % hlink, 'green')
                 elif val.lower() == 'q':
                     sys.exit(0)
+                elif val.lower() == 'i':
+                    # Import requested, continue
+                    pass
                 else:
                     self.printer.err_msg('Error: invalid input\n')
                     sys.exit(1)
+
+            # Import event
+            import_method = (
+                self.get_events().import_ if (
+                    self._event_should_use_new_import_api(event, self.cals[0]))
+                else self.get_events().insert)
+            try:
+                new_event = self._retry_with_backoff(
+                    import_method(calendarId=self.cals[0]['id'], body=event))
+            except HttpError as e:
+                try:
+                    is_skipped_dupe = any(detail.get('reason') == 'duplicate'
+                                          for detail in e.error_details)
+                except Exception:
+                    # Fail gracefully so weird error responses don't blow up.
+                    is_skipped_dupe = False
+                event_label = (
+                    f'"{event["summary"]}"' if event.get('summary')
+                    else f"with start {event['start']}"
+                )
+                if is_skipped_dupe:
+                    # TODO: #492 - Offer to force import dupe anyway?
+                    self.printer.msg(
+                        f'Skipped duplicate event {event_label}.\n')
+                else:
+                    self.printer.err_msg(
+                        f'Failed to import event {event_label}.\n')
+                    self.printer.msg(f'Event details: {event}\n')
+                    self.printer.debug_msg(f'Error details: {e}\n')
+            else:
+                hlink = new_event.get('htmlLink')
+                self.printer.msg(f'New event added: {hlink}\n', 'green')
+
         # TODO: return the number of events added
         return True

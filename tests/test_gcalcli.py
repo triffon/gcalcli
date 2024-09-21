@@ -1,17 +1,21 @@
 from __future__ import absolute_import
 
+import io
+import os
+import re
 from datetime import datetime
 from json import load
-import os
 
-from dateutil.tz import tzutc
-
-from gcalcli.argparsers import (get_cal_query_parser, get_color_parser,
-                                get_conflicts_parser, get_output_parser,
-                                get_search_parser, get_start_end_parser,
-                                get_updates_parser)
+from gcalcli.argparsers import (
+    get_cal_query_parser,
+    get_color_parser,
+    get_conflicts_parser,
+    get_output_parser,
+    get_search_parser,
+    get_start_end_parser,
+    get_updates_parser,
+)
 from gcalcli.cli import parse_cal_names
-from gcalcli.gcal import GoogleCalendarInterface
 from gcalcli.utils import parse_reminder
 
 TEST_DATA_DIR = os.path.dirname(os.path.abspath(__file__)) + '/data'
@@ -91,25 +95,44 @@ def test_cal_query(capsys, PatchedGCalI):
 
 
 def test_add_event(PatchedGCalI):
-    cal_names = parse_cal_names(['jcrowgey@uw.edu'])
+    cal_names = parse_cal_names(['jcrowgey@uw.edu'], printer=None)
     gcal = PatchedGCalI(
             cal_names=cal_names, allday=False, default_reminders=True)
-    title = 'test event'
-    where = 'anywhere'
-    start = 'now'
-    end = 'tomorrow'
-    descr = 'testing'
-    who = 'anyone'
-    reminders = None
-    color = "banana"
-    assert gcal.AddEvent(
-        title, where, start, end, descr, who, reminders, color)
+    assert gcal.AddEvent(title='test event',
+                         where='anywhere',
+                         start='now',
+                         end='tomorrow',
+                         descr='testing',
+                         who='anyone',
+                         reminders=None,
+                         color='banana')
+
+
+def test_add_event_with_cal_prompt(PatchedGCalI, capsys, monkeypatch):
+    cal_names = parse_cal_names(
+        ['jcrowgey@uw.edu', 'joshuacrowgey@gmail.com'], None)
+    gcal = PatchedGCalI(
+            cal_names=cal_names, allday=False, default_reminders=True)
+    # Fake selecting calendar 0 at the prompt
+    monkeypatch.setattr('sys.stdin', io.StringIO('0\n'))
+    assert gcal.AddEvent(title='test event',
+                         where='',
+                         start='now',
+                         end='tomorrow',
+                         descr='',
+                         who='',
+                         reminders=None,
+                         color='')
+    captured = capsys.readouterr()
+    assert re.match(
+        r'(?sm)^0 .*\n1 .*\n.*Specify calendar.*$', captured.out), \
+        f'Unexpected stderr: {captured.out}'
 
 
 def test_add_event_override_color(capsys, default_options,
                                   PatchedGCalIForEvents):
     default_options.update({'override_color': True})
-    cal_names = parse_cal_names(['jcrowgey@uw.edu'])
+    cal_names = parse_cal_names(['jcrowgey@uw.edu'], None)
     gcal = PatchedGCalIForEvents(cal_names=cal_names, **default_options)
     gcal.AgendaQuery()
     captured = capsys.readouterr()
@@ -119,11 +142,26 @@ def test_add_event_override_color(capsys, default_options,
 
 
 def test_quick_add(PatchedGCalI):
-    cal_names = parse_cal_names(['jcrowgey@uw.edu'])
+    cal_names = parse_cal_names(['jcrowgey@uw.edu'], None)
     gcal = PatchedGCalI(cal_names=cal_names)
-    event_text = 'quick test event'
-    reminder = '5m sms'
-    assert gcal.QuickAddEvent(event_text, reminders=[reminder])
+    assert gcal.QuickAddEvent(
+        event_text='quick test event',
+        reminders=['5m sms'])
+
+
+def test_quick_add_with_cal_prompt(PatchedGCalI, capsys, monkeypatch):
+    cal_names = parse_cal_names(
+        ['jcrowgey@uw.edu', 'joshuacrowgey@gmail.com'], None)
+    gcal = PatchedGCalI(cal_names=cal_names)
+    # Fake selecting calendar 0 at the prompt
+    monkeypatch.setattr('sys.stdin', io.StringIO('0\n'))
+    assert gcal.QuickAddEvent(
+        event_text='quick test event',
+        reminders=['5m sms'])
+    captured = capsys.readouterr()
+    assert re.match(
+        r'(?sm)^0 .*\n1 .*\n.*Specify calendar.*$', captured.out), \
+        f'Unexpected stderr: {captured.out}'
 
 
 def test_text_query(PatchedGCalI):
@@ -208,6 +246,25 @@ def test_declined_event_matching_attendee_accepted(PatchedGCalI):
     assert not gcal._DeclinedEvent(event)
 
 
+def test_declined_event_aliased_attendee(PatchedGCalI):
+    """Should detect declined events if attendee has self=True (#620)."""
+    gcal = PatchedGCalI()
+    event = {
+        'gcalcli_cal': {
+            'id': 'user@email.com',
+        },
+        'attendees': [
+            {
+                'email': 'user@otherdomain.com',
+                'self': True,
+                'responseStatus': 'declined',
+            },
+        ]
+    }
+    assert gcal._DeclinedEvent(event), \
+        "Must detect declined 'self' events regardless of email"
+
+
 def test_modify_event(PatchedGCalI):
     opts = get_search_parser().parse_args(['test'])
     gcal = PatchedGCalI(**vars(opts))
@@ -216,10 +273,18 @@ def test_modify_event(PatchedGCalI):
 
 
 def test_import(PatchedGCalI):
-    cal_names = parse_cal_names(['jcrowgey@uw.edu'])
+    cal_names = parse_cal_names(['jcrowgey@uw.edu'], None)
     gcal = PatchedGCalI(cal_names=cal_names, default_reminders=True)
     vcal_path = TEST_DATA_DIR + '/vv.txt'
-    assert gcal.ImportICS(icsFile=open(vcal_path))
+    assert gcal.ImportICS(icsFile=open(vcal_path, errors='replace'))
+
+
+def test_legacy_import(PatchedGCalI):
+    cal_names = parse_cal_names(['jcrowgey@uw.edu'], None)
+    gcal = PatchedGCalI(
+        cal_names=cal_names, default_reminders=True, use_legacy_import=True)
+    vcal_path = TEST_DATA_DIR + '/vv.txt'
+    assert gcal.ImportICS(icsFile=open(vcal_path, errors='replace'))
 
 
 def test_parse_reminder():
@@ -260,26 +325,17 @@ def test_parse_cal_names(PatchedGCalI):
     # and then assert the right number of events
     # for the moment, we assert 0 (which indicates successful completion of
     # the code path, but no events printed)
-    cal_names = parse_cal_names(['j*#green'])
+    cal_names = parse_cal_names(['j*#green'], None)
     gcal = PatchedGCalI(cal_names=cal_names)
     assert gcal.AgendaQuery() == 0
 
-    cal_names = parse_cal_names(['j*'])
+    cal_names = parse_cal_names(['j*'], None)
     gcal = PatchedGCalI(cal_names=cal_names)
     assert gcal.AgendaQuery() == 0
 
-    cal_names = parse_cal_names(['jcrowgey@uw.edu'])
+    cal_names = parse_cal_names(['jcrowgey@uw.edu'], None)
     gcal = PatchedGCalI(cal_names=cal_names)
     assert gcal.AgendaQuery() == 0
-
-
-def test_localize_datetime(PatchedGCalI):
-    dt = GoogleCalendarInterface._localize_datetime(datetime.now())
-    assert dt.tzinfo is not None
-
-    dt = datetime.now(tzutc())
-    dt = GoogleCalendarInterface._localize_datetime(dt)
-    assert dt.tzinfo is not None
 
 
 def test_iterate_events(capsys, PatchedGCalI):

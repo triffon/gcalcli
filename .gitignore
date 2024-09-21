@@ -2,13 +2,17 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+.env/
+.venv/
 venv/
 htmlcov/
 
+/gcalcli/_version.py
 gcalcli.egg-info
 
 .coverage
 .pytest_cache?
 .tox
 
+.python-version
 *.pyc

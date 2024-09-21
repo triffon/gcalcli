@@ -1,6 +1,8 @@
+from ._types import Event
+
 
 class ShowConflicts:
-    active_events = []
+    active_events: list[Event] = []
 
     def __init__(self, show):
         if show:

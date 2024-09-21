@@ -3,7 +3,6 @@
 from collections import OrderedDict
 from datetime import datetime
 from itertools import chain
-from typing import List  # python3.9: can just use `list`
 
 from dateutil.parser import isoparse, parse
 
@@ -13,7 +12,7 @@ from .utils import is_all_day
 FMT_DATE = '%Y-%m-%d'
 FMT_TIME = '%H:%M'
 TODAY = datetime.now().date()
-ACTION_DEFAULT = "patch"
+ACTION_DEFAULT = 'patch'
 
 URL_PROPS = OrderedDict([('html_link', 'htmlLink'),
                          ('hangout_link', 'hangoutLink')])
@@ -33,7 +32,7 @@ class Handler:
     """Handler for a specific detail of an event."""
 
     # list of strings for fieldnames provided by this object
-    fieldnames: List[str] = []
+    fieldnames: list[str] = []
 
     @classmethod
     def get(cls, event):

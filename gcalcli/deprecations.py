@@ -1,7 +1,6 @@
 import argparse
 import functools
-
-import gcalcli
+from typing import Any
 
 from .printer import Printer, valid_color_name
 
@@ -70,10 +69,10 @@ BASE_OPTS = {'program': {'type': str,
                         'action': DeprecatedStoreTrue}}
 
 
-OPTIONS = {
+OPTIONS: dict[str, dict[str, Any]] = {
     'program': {
-        "--client_id": {'default': gcalcli.__API_CLIENT_ID__},
-        "--client_secret": {'default': gcalcli.__API_CLIENT_SECRET__},
+        "--client_id": {'default': None},
+        "--client_secret": {'default': None},
         "--configFolder": {'default': None},
         "--defaultCalendar": {'default': [], 'action': DeprecatedAppend}
     },

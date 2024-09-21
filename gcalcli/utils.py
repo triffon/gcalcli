@@ -1,9 +1,14 @@
 import calendar
-from datetime import datetime, timedelta
 import locale
+import os
+import pathlib
 import re
+import subprocess
 import time
+from datetime import datetime, timedelta
+from typing import Tuple
 
+import babel
 from dateutil.parser import parse as dateutil_parse
 from dateutil.tz import tzlocal
 from parsedatetime.parsedatetime import Calendar
@@ -53,34 +58,52 @@ def set_locale(new_locale):
                 '!\n Check supported locales of your system.\n')
 
 
-def get_times_from_duration(when, duration=0, allday=False):
-
+def get_times_from_duration(
+    when, duration=0, end=None, allday=False
+) -> Tuple[str, str]:
     try:
         start = get_time_from_str(when)
     except Exception:
         raise ValueError('Date and time is invalid: %s\n' % (when))
 
-    if allday:
+    if end is not None:
+        stop = get_time_from_str(end)
+    elif allday:
         try:
             stop = start + timedelta(days=float(duration))
         except Exception:
             raise ValueError(
-                    'Duration time (days) is invalid: %s\n' % (duration))
-
-        start = start.date().isoformat()
-        stop = stop.date().isoformat()
-
+                'Duration time (days) is invalid: %s\n' % (duration)
+            )
+        start = start.date()
+        stop = stop.date()
     else:
         try:
             stop = start + get_timedelta_from_str(duration)
         except Exception:
-            raise ValueError(
-                    'Duration time is invalid: %s\n' % (duration))
+            raise ValueError('Duration time is invalid: %s\n' % (duration))
 
-        start = start.isoformat()
-        stop = stop.isoformat()
+    return start.isoformat(), stop.isoformat()
 
-    return start, stop
+
+def is_dayfirst_locale():
+    """Detect whether system locale date format has day first.
+
+    Examples:
+     - M/d/yy -> False
+     - dd/MM/yy -> True
+     - (UnknownLocaleError) -> False
+
+    Pattern syntax is documented at
+    https://babel.pocoo.org/en/latest/dates.html#pattern-syntax.
+    """
+    try:
+        locale = babel.Locale(babel.default_locale('LC_TIME'))
+    except babel.UnknownLocaleError:
+        # Couldn't detect locale, assume non-dayfirst.
+        return False
+    m = re.search(r'M|d|$', locale.date_formats['short'].pattern)
+    return m and m.group(0) == 'd'
 
 
 def get_time_from_str(when):
@@ -91,7 +114,9 @@ def get_time_from_str(when):
             hour=0, minute=0, second=0, microsecond=0)
 
     try:
-        event_time = dateutil_parse(when, default=zero_oclock_today)
+        event_time = dateutil_parse(
+            when, default=zero_oclock_today, dayfirst=is_dayfirst_locale()
+        )
     except ValueError:
         struct, result = fuzzy_date_parse(when)
         if not result:
@@ -152,3 +177,43 @@ def is_all_day(event):
 
     return (event['s'].hour == 0 and event['s'].minute == 0
             and event['e'].hour == 0 and event['e'].minute == 0)
+
+def localize_datetime(dt):
+    if not hasattr(dt, 'tzinfo'):  # Why are we skipping these?
+        return dt
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=tzlocal())
+    else:
+        return dt.astimezone(tzlocal())
+
+
+def launch_editor(path: str | os.PathLike):
+    if hasattr(os, 'startfile'):
+        os.startfile(path, 'edit')
+        return
+    for editor in (
+        'editor',
+        os.environ.get('EDITOR', None),
+        'xdg-open',
+        'open',
+    ):
+        if not editor:
+            continue
+        try:
+            subprocess.call((editor, path))
+            return
+        except OSError:
+            pass
+    raise OSError(f'No editor/launcher detected on your system to edit {path}')
+
+
+def shorten_path(path: pathlib.Path) -> pathlib.Path:
+    """Try to shorten path using special characters like ~.
+
+    Returns original path unmodified if it can't be shortened.
+    """
+    tilde_home = pathlib.Path('~')
+    expanduser_len = len(tilde_home.expanduser().parts)
+    if path.parts[:expanduser_len] == tilde_home.expanduser().parts:
+        return tilde_home.joinpath(*path.parts[expanduser_len:])
+    return path

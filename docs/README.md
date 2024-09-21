@@ -1,8 +1,8 @@
-gcalcli
-=======
-[![Build Status](https://travis-ci.org/insanum/gcalcli.svg?branch=master)](https://travis-ci.org/insanum/gcalcli)
+# gcalcli
 
-#### Google Calendar Command Line Interface
+Google Calendar Command Line Interface
+
+[![Build Status](https://github.com/insanum/gcalcli/actions/workflows/tests.yml/badge.svg)](https://github.com/insanum/gcalcli/actions/workflows/tests.yml)
 
 gcalcli is a Python application that allows you to access your Google
 Calendar(s) from a command line. It's easy to get your agenda, search for
@@ -11,77 +11,12 @@ events, and even import those annoying ICS/vCal invites from Microsoft
 Exchange and/or other sources. Additionally, gcalcli can be used as a reminder
 service and execute any application you want when an event is coming up.
 
-gcalcli uses the [Google Calendar API version 3](https://developers.google.com/google-apps/calendar/).
+gcalcli uses the [Google Calendar API version
+3](https://developers.google.com/calendar/api/v3/reference/).
 
-Requirements
-------------
+## Features
 
-* [Python3](http://www.python.org)
-* [dateutil](http://www.labix.org/python-dateutil)
-* [Google API Client](https://developers.google.com/api-client-library/python)
-* [httplib2](https://github.com/httplib2/httplib2)
-* [oauth2client](https://github.com/google/oauth2client)
-* [parsedatetime](https://github.com/bear/parsedatetime)
-* A love for the command line!
-
-### Optional packages
-
-* [vobject](http://vobject.skyhouseconsulting.com) Python module
-  Used for ics/vcal importing.
-
-Installation
-------------
-
-Check your OS distribution for packages.
-
-### Debian/Ubuntu
-
-```sh
-apt-get install gcalcli
-```
-
-### Void Linux 
-```sh
-xbps-install gcalcli
-```
-
-### Install using [Nix](https://nixos.org/nix/)
-
-```sh
-nix-env -i gcalcli
-```
-
-### Install using [Homebrew](https://brew.sh/) (MacOS)
-
-```sh
-brew install gcalcli
-```
-
-
-### Install from PyPI
-
-```sh
-pip install gcalcli
-```
-
-### Install from source
-
-```sh
-git clone https://github.com/insanum/gcalcli.git
-cd gcalcli
-python setup.py install
-```
-
-### Install optional package
-
-```sh
-pip install vobject
-```
-
-Features
---------
-
- * OAuth2 authention with your Google account
+ * OAuth2 authentication with your Google account
  * list your calendars
  * show an agenda using a specified start/end date and time
  * show updates since a specified datetime for events between a start/end date and time
@@ -98,28 +33,69 @@ Features
  * work against specific calendars (by calendar name w/ regex)
  * flag file support for specifying option defaults
  * colored output and unicode character support
+ * custom shell completion for bash, zsh, fish, etc
  * super fun hacking with shell scripts, cron, screen, tmux, conky, etc
 
-Screenshots
------------
+[![Screenshot of agenda and calendar view](https://raw.githubusercontent.com/insanum/gcalcli/HEAD/docs/gcalcli_5_sm.png)](https://raw.githubusercontent.com/insanum/gcalcli/HEAD/docs/gcalcli_5.png)
 
-![gcalcli 5](https://github.com/insanum/gcalcli/raw/master/docs/gcalcli_5.png)
 
-![gcalcli 1](https://github.com/insanum/gcalcli/raw/master/docs/gcalcli_1.png)
+## Requirements
 
-![gcalcli 2](https://github.com/insanum/gcalcli/raw/master/docs/gcalcli_2.png)
+Installing and using gcalcli requires python 3, the dependencies listed in
+pyproject.toml, and a love for the command line!
 
-![gcalcli 3](https://github.com/insanum/gcalcli/raw/master/docs/gcalcli_3.png)
+## Installation
 
-![gcalcli 4](https://github.com/insanum/gcalcli/raw/master/docs/gcalcli_4.png)
+Check your OS distribution for packages.
 
-HowTo
------
+If your OS doesn't have the latest released version you can install using pip
+(or pipx).
 
-#### Usage
+### Install on Linux
+
+Several Linux distros have packages available. A few popular ones...
+
+* Debian/Ubuntu: `sudo apt install gcalcli`
+* Void Linux: `xbps-install gcalcli`
+
+### Install using [Nix](https://nixos.org/nix/)
+
+```shell
+nix-env -i gcalcli
+```
+
+### Install using [Homebrew](https://brew.sh/) (MacOS)
+
+```shell
+brew install gcalcli
+```
+
+### Install from PyPI
+
+```shell
+pip install gcalcli[vobject]
+# OR: pipx install gcalcli[vobject]
+```
+
+If you don't need the `import` command you can install without extras:
+
+```shell
+pip install gcalcli
+```
+
+### Install from source
+
+```sh
+git clone https://github.com/insanum/gcalcli.git
+cd gcalcli
+pip install .[vobject]
+```
+
+## Usage
 
 `gcalcli` provides a series of subcommands with the following functionality:
 
+    init                initialize authentication, etc
     list                list available calendars
     edit                edit calendar events
     agenda              get an agenda for a time period
@@ -133,39 +109,42 @@ HowTo
 
 See the manual (`man (1) gcalcli`), or run with `--help`/`-h` for detailed usage.
 
-#### Login Information
+### Initial setup
 
 OAuth2 is used for authenticating with your Google account. The resulting token
-is placed in the `~/.gcalcli_oauth` file. When you first start gcalcli the
+is placed in an `oauth` file in your platform's data directory (for example
+~/.local/share/gcalcli/oauth on Linux). When you first start gcalcli the
 authentication process will proceed. Simply follow the instructions.
 
 **You currently have to use your own Calendar API token.** Our Calendar API token is restricted to few users only and waits for Google's approval to be unlocked.
 
-1. [Create a New Project](https://console.developers.google.com/projectcreate) within the Google developer console
-   1. Activate the "Create" button.
-2. [Enable the Google Calendar API](https://console.developers.google.com/apis/api/calendar-json.googleapis.com/)
-   1. Activate the "Enable" button.
-3. [Create OAuth2 consent screen](https://console.developers.google.com/apis/credentials/consent/edit;newAppInternalUser=false) for an "UI /Desktop Application".
-   1. Fill out required App information section
-      1. Specify App name. Example: "gcalcli"
-      2. Specify User support email. Example: your@gmail.com
-   2. Fill out required Developer contact information
-      1. Specify Email addresses. Example: your@gmail.com
-   3. Activate the "Save and continue" button.
-   4. Scopes: activate the "Save and continue" button.
-   5. Test users
-      1. Add your@gmail.com
-      2. Activate the "Save and continue" button.
-4. [Create OAuth Client ID](https://console.developers.google.com/apis/credentials/oauthclient)
-   1. Specify Application type: Desktop app.
-   2. Activate the "Create" button.
-5. Grab your newly created Client ID (in the form "xxxxxxxxxxxxxxx.apps.googleusercontent.com") and Client Secret from the Credentials page.
-6. Call `gcalcli` with your Client ID and Client Secret to login via the OAuth2 Authorization Screen.
-   ` gcalcli --client-id=xxxxxxxxxxxxxxx.apps.googleusercontent.com --client-secret=xxxxxxxxxxxxxxxxx list`.
-   In most shells, putting a space before the command will keep it, and therefore your secrets, out of history. Check with `history | tail`.
-7. This should automatically open the OAuth2 authorization screen in your default browser.
+Set up your Google "project" and auth token as explained in
+[docs/auth-api.md](https://github.com/insanum/gcalcli/blob/HEAD/docs/api-auth.md),
+then run gcalcli passing a `--client-id` to finish setup:
 
-#### HTTP Proxy Support
+```shell
+gcalcli --client-id=xxxxxxxxxxxxxxx.apps.googleusercontent.com init
+```
+
+Enter the client secret when prompted and follow its directions to complete the permission flow.
+
+### Shell completion
+
+gcalcli provides command completion you can configure in bash, zsh, fish, etc using the [https://kislyuk.github.io/argcomplete/] library.
+
+To enable it, follow argcomplete's setup instructions to ensure your shell can find the completion hooks.
+
+```shell
+gcalcli <TAB>
+add
+agenda
+agendaupdate
+...
+```
+
+NOTE: Setup for fish and other shells is currently explained [under "contrib"](https://github.com/kislyuk/argcomplete/tree/develop/contrib) instead of their main docs, and their centralized "global activation" mechanism doesn't seem to be supported yet for those shells.
+
+### HTTP Proxy Support
 
 gcalcli will automatically work with an HTTP Proxy simply by setting up some
 environment variables used by the gdata Python module:
@@ -179,20 +158,48 @@ proxy-password or proxy_password
 
 Note that these environment variables must be lowercase.
 
-#### Flag File
+### Configuration
 
-`gcalcli` is able to read default configuration information from a flag file.
-This file is located, by default, at '~/.gcalclirc'.  The flag file takes one
-command line parameter per line.
-
-In the current version, the flag file only supports the global options (options
-against the `gcalcli` program itself).  The plan, longer term, is to support a
-a configuration formation (probably toml or ini), which will allow for
-configuration of subcommands (such as `add`, `agenda`, `calw`, etc.)
+gcalcli supports some configuration options in a config.toml file under your
+platform's standard config directory path. Edit it with `gcalcli config edit`.
 
 Example:
 
+```toml
+#:schema https://raw.githubusercontent.com/insanum/gcalcli/HEAD/data/config-schema.json
+[calendars]
+default-calendars = ["Personal", "Work"]
+ignore-calendars = ["Boring stuff", "Holidays"]
+
+[output]
+week-start = "monday"
 ```
+
+You can also use the $GCALCLI_CONFIG environment variable to customize which
+config file/directory to use, which is useful if you need to dynamically switch
+between different sets of configuration. For example:
+
+```shell
+GCALCLI_CONFIG=~/.config/gcalcli/config.tuesdays.toml gcalcli add
+```
+
+#### Using cli args from a file (and gcalclirc flag file)
+
+You can save commonly-used options in a file and load them into cli options
+using an `@` prefix. For example:
+
+```shell
+gcalcli @~/.gcalcli_global_flags add \
+    @~/.gcalcli_add_flags
+```
+
+will insert flags listed in a ~/.gcalcli_global_flags file (one per line), then
+load more flags specific to the add command from ~/.gcalcli_add_flags.
+
+The flag files should have a set of cli args one per line (with no blank lines
+in between) like:
+
+```shell
 --nocache
 --nocolor
 --default-calendar=CALENDAR_NAME
@@ -202,12 +209,10 @@ Example:
 Note that long options require an equal sign if specifying a parameter.  With
 short options the equal sign is optional.
 
-#### Configuration Folders
-
-gcalcli is able to store all its necessary information in a specific folder (use
-the --configFolder option.) Each folder will contain 2 files: oauth and cache.
-An optional 3rd file, gcalclirc, can be present for specific flags that you only
-want to apply when using this configuration folder.
+Currently any file named "gcalclirc" in your config directory (or a ~/.gcalclirc
+file) will be automatically loaded unconditionally like that as global options,
+but that mechanism may change in the future because it's more brittle than
+config.toml.
 
 #### Importing VCS/VCAL/ICS Files from Exchange (or other)
 
@@ -216,7 +221,7 @@ a filename on the command line or can read from standard input. Here is a script
 that can be used as an attachment handler for Thunderbird or in a mailcap entry
 with Mutt (or in Mutt you could just use the attachment viewer and pipe command):
 
-```sh
+```bash
 #!/bin/bash
 
 TERMINAL=evilvte
@@ -235,7 +240,7 @@ extension installed for seeing the calendar attachments when not using
 [bug report](https://bugzilla.mozilla.org/show_bug.cgi?id=505024)
 for more details.
 
-#### Event Popup Reminders
+### Event Popup Reminders
 
 The 'remind' command for gcalcli is used to execute any command as an event
 notification. This can be a notify-send or an xmessage-like popup or whatever
@@ -251,7 +256,7 @@ Cron:
 
 Shell script like your .xinitrc so notifications only occur when you're logged
 in via X:
-```sh
+```bash
 #!/bin/bash
 
 [[ -x /usr/bin/dunst ]] && /usr/bin/dunst -config ~/.dunstrc &
@@ -267,7 +272,7 @@ exec herbstluftwm # :-)
 ```
 
 By default gcalcli executes the notify-send command for notifications. Most
-common Linux desktop enviroments already contain a DBUS notification daemon
+common Linux desktop environments already contain a DBUS notification daemon
 that supports libnotify so it should automagically just work. If you're like
 me and use nothing that is common I highly recommend the
 [dunst](https://github.com/knopwob/dunst) dmenu'ish notification daemon.
@@ -276,7 +281,7 @@ Note that each time you run this you will get a reminder if you're still inside
 the event duration.  Also note that due to time slip between machines, gcalcli
 will give you a ~5 minute margin of error.  Plan your cron jobs accordingly.
 
-#### Agenda On Your Root Desktop
+### Agenda On Your Root Desktop
 
 Put your agenda on your desktop using
 [Conky](https://github.com/brndnmtthws/conky). The '--conky' option causes
@@ -284,20 +289,20 @@ gcalcli to output Conky color sequences. Note that you need to use the Conky
 'execpi' command for the gcalcli output to be parsed for color sequences. Add
 the following to your .conkyrc:
 
-```
+```conkyrc
 ${execpi 300 gcalcli --conky agenda}
 ```
 
 To also get a graphical calendar that shows the next three weeks add:
 
-```
+```conkyrc
 ${execpi 300 gcalcli --conky calw 3}
 ```
 
 You may need to increase the `text_buffer_size` in your conkyrc file.  Users
 have reported that the default of 256 bytes is too small for busy calendars.
 
-Additionaly you need to set `--lineart=unicode` to output unicode-characters
+Additionally you need to set `--lineart=unicode` to output unicode-characters
 for box drawing. To avoid misaligned borders use a monospace font like 'DejaVu
 Sans Mono'. On Python2 it might be necessary to set the environment variable
 `PYTHONIOENCODING=utf8` if you are using characters beyond ascii. For
@@ -306,44 +311,55 @@ example:
 ${font DejaVu Sans Mono:size=9}${execpi 300 export PYTHONIOENCODING=utf8 && gcalcli --conky --lineart=unicode calw 3}
 ```
 
-#### Agenda Integration With tmux
+### Agenda Integration With tmux
 
 Put your next event in the left of your 'tmux' status line.  Add the following
 to your tmux.conf file:
 
-```
+```tmux
 set-option -g status-interval 60
 set-option -g status-left "#[fg=blue,bright]#(gcalcli agenda | head -2 | tail -1)#[default]"
 ```
 
-#### Agenda Integration With screen
+### Agenda Integration With screen
 
 Put your next event in your 'screen' hardstatus line.  First add a cron job
 that will dump you agenda to a text file:
 
-```
+```shell
 % crontab -e
 ```
 
 Then add the following line:
 
-```
+```shell
 */5 * * * * gcalcli --nocolor --nostarted agenda "`date`" > /tmp/gcalcli_agenda.txt
 ```
 
 Next create a simple shell script that will extract the first agenda line.
 Let's call this script 'screen_agenda':
 
-```
+```sh
 #!/bin/bash
 head -2 /tmp/gcalcli_agenda.txt | tail -1
 ```
 
 Next configure screen's hardstatus line to gather data from a backtick command.
-Of course your hardstatus line is most likely very different than this (Mine
-is!):
+Of course your hardstatus line is most likely very different than this:
 
-```
+```screenrc
 backtick 1 60 60 screen_agenda
 hardstatus "[ %1` ]"
 ```
+
+## More screenshots
+
+![gcalcli 1](https://raw.githubusercontent.com/insanum/gcalcli/HEAD/docs/gcalcli_1.png)
+
+![gcalcli 2](https://raw.githubusercontent.com/insanum/gcalcli/HEAD/docs/gcalcli_2.png)
+
+![gcalcli 3](https://raw.githubusercontent.com/insanum/gcalcli/HEAD/docs/gcalcli_3.png)
+
+Reminder popup:
+
+![Reminder popup](https://raw.githubusercontent.com/insanum/gcalcli/HEAD/docs/gcalcli_4.png)
