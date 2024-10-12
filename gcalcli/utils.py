@@ -97,6 +97,8 @@ def is_dayfirst_locale():
     Pattern syntax is documented at
     https://babel.pocoo.org/en/latest/dates.html#pattern-syntax.
     """
+    # Hardcode to not dayfirst locale so that we can use the ISO date format
+    return False
     try:
         locale = babel.Locale(babel.default_locale('LC_TIME'))
     except babel.UnknownLocaleError:
